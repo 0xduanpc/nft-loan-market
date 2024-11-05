@@ -88,7 +88,7 @@ contract ExchangeV1 is Ownable, ExchangeDomainV1 {
                 keccak256(
                     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
                 ),
-                keccak256(bytes("NFT-LOAN-MARKET")),
+                keccak256(bytes("NFT-MARKET")),
                 keccak256(bytes("1")),
                 block.chainid,
                 address(this)
@@ -121,7 +121,7 @@ contract ExchangeV1 is Ownable, ExchangeDomainV1 {
         validateBuyerFeeSig(order, buyerFee, buyerFeeSig);
         uint paying = order.buying.mul(amount).div(order.selling);
         verifyOpenAndModifyOrderState(order.key, order.selling, amount);
-        // ETH无法授权并从用户账户扣款，所以ETH只能现付，作为buyAsset
+        // ETH cannot get approved
         require(
             order.key.sellAsset.assetType != AssetType.ETH,
             "ETH is not supported on sell side"
