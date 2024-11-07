@@ -26,6 +26,18 @@ contract RentDomainV1 {
         uint endTime;
     }
 
+    struct Period {
+        uint startTime;
+        uint endTime;
+    }
+
+    struct Pending {
+        uint lastClaimTime;
+        address token;
+        TokenType tokenType;
+        uint tokenAmount;
+    }
+
     /* An ECDSA signature. */
     struct Sig {
         /* v parameter */

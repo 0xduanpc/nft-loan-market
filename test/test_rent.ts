@@ -65,6 +65,8 @@ describe("Rent Test", () => {
   let erc20TransferProxy: any;
   let RentNFT;
   let rentNFT: any;
+  let RentState;
+  let rentState: any;
   let RentV1;
   let rentV1: any;
   let domain: any;
@@ -91,6 +93,9 @@ describe("Rent Test", () => {
     RentNFT = await ethers.getContractFactory("RentNFT");
     rentNFT = await RentNFT.deploy("RentNFT", "RNFT");
 
+    RentState = await ethers.getContractFactory("RentStateV1");
+    rentState = await RentState.deploy();
+
     await testErc20
       .connect(signer1)
       .approve(await erc20TransferProxy.getAddress(), "5000000000000000000");
@@ -102,12 +107,14 @@ describe("Rent Test", () => {
     rentV1 = await RentV1.deploy(
       await erc20TransferProxy.getAddress(),
       await rentNFT.getAddress(),
+      await rentState.getAddress(),
       deployer.address,
       deployer.address
     );
 
     await erc20TransferProxy.addOperator(await rentV1.getAddress());
     await rentNFT.setExecutor(await rentV1.getAddress(), true);
+    await rentState.addOperator(await rentV1.getAddress());
 
     domain = {
       name: "NFT-MARKET",

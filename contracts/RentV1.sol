@@ -8,7 +8,8 @@ import "@openzeppelin/contracts/utils/Strings.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-import "./exchange/RentDomainV1.sol";
+import "./rent/RentDomainV1.sol";
+import "./rent/RentStateV1.sol";
 import "./utils/Uint.sol";
 import "./proxy/ERC20TransferProxy.sol";
 import "./tokens/RentNFT.sol";
@@ -67,27 +68,12 @@ contract RentV1 is Ownable, ReentrancyGuard, RentDomainV1 {
 
     ERC20TransferProxy public erc20TransferProxy;
     RentNFT public rentNFT;
-
-    // rent started or cancelled
-    mapping(bytes32 => bool) public completed;
-    struct Period {
-        uint startTime;
-        uint endTime;
-    }
-    // nft + id
-    mapping(bytes32 => Period[]) public period;
-    struct Pending {
-        uint lastClaimTime;
-        address token;
-        TokenType tokenType;
-        uint tokenAmount;
-    }
-    // nft + id + startTime + endTime
-    mapping(bytes32 => Pending) public tokenToClaim;
+    RentStateV1 public state;
 
     constructor(
         ERC20TransferProxy _erc20TransferProxy,
         RentNFT _rentNFT,
+        RentStateV1 _state,
         address payable _beneficiary,
         address _feeSigner
     ) {
@@ -104,6 +90,7 @@ contract RentV1 is Ownable, ReentrancyGuard, RentDomainV1 {
         );
         erc20TransferProxy = _erc20TransferProxy;
         rentNFT = _rentNFT;
+        state = _state;
         beneficiary = _beneficiary;
         feeSigner = _feeSigner;
     }
@@ -284,23 +271,27 @@ contract RentV1 is Ownable, ReentrancyGuard, RentDomainV1 {
         require(block.timestamp <= order.startTime, "order is already started");
         bytes32 orderKey = getOrderKey(order);
         bytes32 nftKey = getNftKey(order.nft, order.nftId);
-        require(!completed[orderKey], "order is completed or cancelled");
-        completed[orderKey] = true;
-        for (uint i = 0; i < period[nftKey].length; i++) {
+        require(
+            !state.getCompleted(orderKey),
+            "order is completed or cancelled"
+        );
+        state.setCompleted(orderKey, true);
+        Period[] memory periods = state.getPeriods(nftKey);
+        for (uint i = 0; i < periods.length; i++) {
             require(
-                (period[nftKey][i].endTime <= order.startTime ||
-                    period[nftKey][i].startTime >= order.endTime),
+                (periods[i].endTime <= order.startTime ||
+                    periods[i].startTime >= order.endTime),
                 string(
                     abi.encodePacked(
                         "nft is already rented between ",
-                        Strings.toString(period[nftKey][i].startTime),
+                        Strings.toString(periods[i].startTime),
                         " and ",
-                        Strings.toString(period[nftKey][i].endTime)
+                        Strings.toString(periods[i].endTime)
                     )
                 )
             );
         }
-        period[nftKey].push(Period(order.startTime, order.endTime));
+        state.pushPeriod(nftKey, Period(order.startTime, order.endTime));
     }
 
     function getOrderKey(Order calldata order) public pure returns (bytes32) {
@@ -382,7 +373,7 @@ contract RentV1 is Ownable, ReentrancyGuard, RentDomainV1 {
         address nft,
         uint nftId
     ) external view returns (Period[] memory) {
-        return period[getNftKey(nft, nftId)];
+        return state.getPeriods(getNftKey(nft, nftId));
     }
 
     function getPendingKey(
@@ -394,19 +385,22 @@ contract RentV1 is Ownable, ReentrancyGuard, RentDomainV1 {
         return keccak256(abi.encodePacked(nft, nftId, startTime, endTime));
     }
 
-    function pendingToClaim(Order memory order, uint leftAmount) internal {
+    function pendingToClaim(Order calldata order, uint leftAmount) internal {
         bytes32 pendingKey = getPendingKey(
             order.nft,
             order.nftId,
             order.startTime,
             order.endTime
         );
-        tokenToClaim[pendingKey] = Pending({
-            lastClaimTime: order.startTime,
-            token: order.token,
-            tokenType: order.tokenType,
-            tokenAmount: leftAmount
-        });
+        state.setTokenToClaim(
+            pendingKey,
+            Pending({
+                lastClaimTime: order.startTime,
+                token: order.token,
+                tokenType: order.tokenType,
+                tokenAmount: leftAmount
+            })
+        );
     }
 
     function claim(
@@ -421,26 +415,19 @@ contract RentV1 is Ownable, ReentrancyGuard, RentDomainV1 {
         );
 
         bytes32 pendingKey = getPendingKey(nft, nftId, startTime, endTime);
-        Pending storage pend = tokenToClaim[pendingKey];
+        Pending memory pend = state.getTokenToClaim(pendingKey);
         uint claimAmount;
         if (block.timestamp >= endTime) {
             claimAmount = pend.tokenAmount;
             bytes32 nftKey = getNftKey(nft, nftId);
-            for (uint i = 0; i < period[nftKey].length; i++) {
-                Period memory per = period[nftKey][i];
-                if (per.startTime == startTime && per.endTime == endTime) {
-                    period[nftKey][i] = period[nftKey][
-                        period[nftKey].length - 1
-                    ];
-                    period[nftKey].pop();
-                }
-            }
+            state.popPeriod(nftKey, Period(startTime, endTime));
         } else if (block.timestamp > pend.lastClaimTime) {
             claimAmount = (
                 pend.tokenAmount.mul(block.timestamp - pend.lastClaimTime)
             ).div(endTime - pend.lastClaimTime);
             pend.tokenAmount -= claimAmount;
             pend.lastClaimTime = block.timestamp;
+            state.setTokenToClaim(pendingKey, pend);
         }
         if (claimAmount > 0) {
             if (pend.tokenType == TokenType.ETH) {
@@ -458,16 +445,17 @@ contract RentV1 is Ownable, ReentrancyGuard, RentDomainV1 {
         uint endTime
     ) external view returns (Pending memory) {
         bytes32 pendingKey = getPendingKey(nft, nftId, startTime, endTime);
-        return tokenToClaim[pendingKey];
+        return state.getTokenToClaim(pendingKey);
     }
 
     function cancel(Order calldata order) external {
         require(order.owner == msg.sender, "not an owner");
+        bytes32 orderKey = getOrderKey(order);
         require(
-            completed[getOrderKey(order)] == false,
+            state.getCompleted(orderKey) == false,
             "already started or cancelled"
         );
-        completed[getOrderKey(order)] = true;
+        state.setCompleted(orderKey, true);
         emit Cancel(
             order.nft,
             order.nftId,
